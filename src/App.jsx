@@ -1,124 +1,166 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { ocrExtract, cleanLineText } from './ocr.js'
+import { useState, useEffect } from "react";
+import Tesseract from "tesseract.js";
+import "./index.css";
 
-export default function App(){
-  const [recipient, setRecipient] = useState('')
-  const [deputy, setDeputy] = useState('')
-  const [recipientErr, setRecipientErr] = useState(false)
-  const [deputyErr, setDeputyErr] = useState(false)
-  const [notes, setNotes] = useState('تحديث')
-  const [people, setPeople] = useState([]) // {name, code, status}
-  const [imageUrl, setImageUrl] = useState(null)
-  const [finalText, setFinalText] = useState('')
-  const [busy, setBusy] = useState(false)
-  const imgRef = useRef(null)
-  const canvasRef = useRef(null)
-  const dropRef = useRef(null)
+function App() {
+  const [text, setText] = useState("");
+  const [units, setUnits] = useState([]);
+  const [receiver, setReceiver] = useState("");
+  const [deputy, setDeputy] = useState("");
+  const [errors, setErrors] = useState({});
+  const [dark, setDark] = useState(
+    localStorage.getItem("theme") === "dark"
+  );
 
-  useEffect(()=>{
-    const saved = localStorage.getItem('theme') || 'light'
-    document.documentElement.classList.toggle('dark', saved==='dark')
-  },[])
-
-  function toggleTheme(){ const isDark = document.documentElement.classList.toggle('dark'); localStorage.setItem('theme', isDark ? 'dark' : 'light') }
-
-  useEffect(()=>{
-    if(!imageUrl) return
-    const img = imgRef.current; if(!img) return
-    const onload = ()=>{ const c = canvasRef.current; const ctx = c.getContext('2d',{willReadFrequently:true}); c.width = img.naturalWidth; c.height = img.naturalHeight; ctx.drawImage(img,0,0) }
-    img.addEventListener('load', onload); return ()=> img.removeEventListener('load', onload)
-  },[imageUrl])
-
-  useEffect(()=>{
-    function onPaste(e){
-      const items = e.clipboardData?.items || []
-      for(const it of items){ if(it.type?.startsWith('image/')){ const f = it.getAsFile(); const url = URL.createObjectURL(f); setImageUrl(url); e.preventDefault(); break } }
+  // تطبيق الوضع الداكن/الفاتح
+  useEffect(() => {
+    if (dark) {
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
     }
-    window.addEventListener('paste', onPaste); return ()=> window.removeEventListener('paste', onPaste)
-  },[])
+  }, [dark]);
 
-  useEffect(()=>{
-    const el = dropRef.current; if(!el) return
-    const prevent=e=>{e.preventDefault(); e.stopPropagation()}
-    const drop=e=>{ prevent(e); const f = e.dataTransfer?.files?.[0]; if(f) setImageUrl(URL.createObjectURL(f)) }
-    el.addEventListener('dragover', prevent); el.addEventListener('dragenter', prevent); el.addEventListener('drop', drop)
-    return ()=>{ el.removeEventListener('dragover', prevent); el.removeEventListener('dragenter', prevent); el.removeEventListener('drop', drop) }
-  },[])
+  // رفع صورة
+  const handleImage = async (file) => {
+    if (!file) return;
+    const { data } = await Tesseract.recognize(file, "ara");
+    const cleaned = data.text
+      .split("\n")
+      .map((line) => line.replace(/[^\u0600-\u06FF0-9\s\-]/g, "").trim())
+      .filter((l) => l.length > 0);
+    setUnits(cleaned.map((u, i) => ({ id: i, name: u, code: "", status: "في الميدان" })));
+  };
 
-  function onFile(e){ const f = e.target.files?.[0]; if(f) setImageUrl(URL.createObjectURL(f)) }
-
-  function parseNameCode(text){
-    text = cleanLineText(text)
-    let m = text.match(/^(.+?)\s+([A-Za-z]{1,4}-?\d{1,4})$/)
-    if(m) return { name: m[1].trim(), code: m[2].trim() }
-    m = text.match(/^([A-Za-z]{1,4}-?\d{1,4})\s+(.+)$/)
-    if(m) return { name: m[2].trim(), code: m[1].trim() }
-    return { name: text.trim(), code: '' }
-  }
-
-  async function extract(){
-    if(!imageUrl){ alert('أضف صورة أولاً'); return }
-    setBusy(true); try{
-      const lines = await ocrExtract(imageUrl)
-      const arr = []
-      for(const line of lines){
-        let txt = (line.text||'').trim(); if(!txt) continue
-        txt = cleanLineText(txt); if(!/[\u0600-\u06FF]/.test(txt)) continue
-        const { name, code } = parseNameCode(txt); if(!name) continue
-        arr.push({ name, code, status: 'field' })
+  const handlePaste = (e) => {
+    const items = e.clipboardData.items;
+    for (let item of items) {
+      if (item.type.indexOf("image") !== -1) {
+        const file = item.getAsFile();
+        handleImage(file);
       }
-      const map = new Map(); for(const p of arr){ const key=(p.name+'|'+p.code).trim(); if(!map.has(key)) map.set(key,p) }
-      setPeople(Array.from(map.values()))
-    }catch(e){ console.error(e); alert('خطأ أثناء الاستخراج') } finally { setBusy(false) }
-  }
+    }
+  };
 
-  function generate(){
-    const rEmpty = !recipient.trim(); const dEmpty = !deputy.trim()
-    setRecipientErr(rEmpty); setDeputyErr(dEmpty); if(rEmpty||dEmpty) return
-    const inField = people.filter(p=>p.status!=='oos')
-    const oos = people.filter(p=>p.status==='oos')
-    const totalField = inField.length + 1
-    const listField = inField.map(p=>`${p.name}${p.code? ' ' + p.code : ''}${p.status==='busy' ? ' (مشغول)' : ''}`).join('\n')
-    const listOOS = oos.map(p=>`${p.name}${p.code? ' ' + p.code : ''}`).join('\n')
-    const text = `📌 استلام العمليات 📌
+  // توليد التقرير
+  const generateReport = () => {
+    const errs = {};
+    if (!receiver.trim()) errs.receiver = "حقل المستلم مطلوب";
+    if (!deputy.trim()) errs.deputy = "حقل النائب مطلوب";
+    setErrors(errs);
+    if (Object.keys(errs).length > 0) return;
 
- المستلم : ${recipient}
+    const inField = units.filter((u) => u.status !== "خارج الخدمة");
+    const outField = units.filter((u) => u.status === "خارج الخدمة");
 
- النائب : ${deputy}
+    let report = `📌 استلام العمليات 📌
 
-عدد و اسماء الوحدات الاسعافيه في الميدان : {${totalField}}
-${listField ? listField + '\n' : ''}
-خارج الخدمة : (${oos.length})
-${listOOS ? listOOS + '\n' : ''}
+المستلم : ${receiver}
+النائب  : ${deputy}
+
+عدد و اسماء الوحدات الاسعافيه في الميدان : (${inField.length + 1})
+${inField.map((u) => `- ${u.name} | ${u.code} ${u.status === "مشغول" ? "(مشغول)" : ""}`).join("\n")}
+
+خارج الخدمة : (${outField.length})
+
 🎙️ تم استلام العمليات و جاهزون للتعامل مع البلاغات
+الملاحظات : تحديث`;
 
-الملاحظات : ${notes}`
-    setFinalText(text)
-  }
+    setText(report);
+  };
 
-  async function copyFinal(){ if(!finalText) return; try{ await navigator.clipboard.writeText(finalText); alert('تم النسخ ✅') }catch{ alert('انسخ يدويًا') } }
+  const copyReport = () => {
+    navigator.clipboard.writeText(text);
+    alert("تم نسخ التقرير ✅");
+  };
 
   return (
-    <div className="min-h-screen p-4 md:p-6 bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-      <div className="max-w-3xl mx-auto space-y-4">
-        <div className="card">
-          <div className="header-wrap">
-            <img src="/logo-right.png" className="header-logo" alt="logo right" />
-            <h1 className="title">تحديث مركز العمليات للصحة</h1>
-            <img src="/logo-left.png" className="header-logo" alt="logo left" />
-          </div>
-          <div className="flex items-center justify-center mt-3">
-            <button onClick={toggleTheme} className="btn btn-ghost">الوضع الداكن/الفاتح</button>
-          </div>
-        </div>
+    <div className="app" onPaste={handlePaste}>
+      {/* الشعاران + العنوان */}
+      <header className="header">
+        <img src="/logo-left.png" alt="logo left" className="logo"/>
+        <h1>تحديث مركز العمليات للصحة</h1>
+        <img src="/logo-right.png" alt="logo right" className="logo"/>
+      </header>
 
-        <div className="card space-y-3">
-          <div className="grid md:grid-cols-2 gap-3">
-            <div>
-              <label className="label">المستلم</label>
-              <input className="input" value={recipient} onChange={e=>setRecipient(e.target.value)} placeholder="الاسم + الكود" />
-              {recipientErr && <div className="text-red-500 text-xs mt-1">يجب عليك كتابة الاسم مع كود</div>}
-            </div>
-            <div>
-              <label className="label">النائب</label>
-            <...[TRUNCATED]...>
+      {/* الحقول */}
+      <div className="form">
+        <div>
+          <label>المستلم</label>
+          <input
+            type="text"
+            value={receiver}
+            onChange={(e) => setReceiver(e.target.value)}
+            className={errors.receiver ? "error" : ""}
+            placeholder="أدخل اسم المستلم"
+          />
+          {errors.receiver && <p className="err">{errors.receiver}</p>}
+        </div>
+        <div>
+          <label>النائب</label>
+          <input
+            type="text"
+            value={deputy}
+            onChange={(e) => setDeputy(e.target.value)}
+            className={errors.deputy ? "error" : ""}
+            placeholder="أدخل اسم النائب"
+          />
+          {errors.deputy && <p className="err">{errors.deputy}</p>}
+        </div>
+      </div>
+
+      {/* الوحدات */}
+      <div className="units">
+        {units.map((u, i) => (
+          <div key={i} className="unit">
+            <input
+              value={u.name}
+              onChange={(e) => {
+                const copy = [...units];
+                copy[i].name = e.target.value;
+                setUnits(copy);
+              }}
+            />
+            <input
+              value={u.code}
+              placeholder="كود"
+              onChange={(e) => {
+                const copy = [...units];
+                copy[i].code = e.target.value;
+                setUnits(copy);
+              }}
+            />
+            <select
+              value={u.status}
+              onChange={(e) => {
+                const copy = [...units];
+                copy[i].status = e.target.value;
+                setUnits(copy);
+              }}
+            >
+              <option>في الميدان</option>
+              <option>مشغول</option>
+              <option>خارج الخدمة</option>
+            </select>
+          </div>
+        ))}
+      </div>
+
+      {/* الأزرار */}
+      <div className="actions">
+        <button className="violet" onClick={generateReport}>توليد النص النهائي</button>
+        <button className="violet" onClick={copyReport}>نسخ النتيجة</button>
+        <button onClick={() => setDark(!dark)}>
+          {dark ? "الوضع الفاتح" : "الوضع الداكن"}
+        </button>
+      </div>
+
+      {/* النص النهائي */}
+      {text && <pre className="report">{text}</pre>}
+    </div>
+  );
+}
+
+export default App;
